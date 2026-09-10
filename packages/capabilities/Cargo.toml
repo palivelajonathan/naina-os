@@ -1,0 +1,10 @@
+[package]
+name = "capabilities"
+version = "0.1.0"
+edition = "2024"
+description = "Capability-Based Access Control (CBAC) types and registry for NAINA OS"
+readme = "README.md"
+
+[dependencies]
+configuration = { path = "../configuration" }
+logging = { path = "../logging" }

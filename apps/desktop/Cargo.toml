@@ -1,0 +1,30 @@
+[package]
+name = "desktop-host"
+version = "0.1.0"
+edition = "2021"
+description = "NAINA OS Desktop Host application composition root binary"
+
+[[bin]]
+name = "naina-desktop"
+path = "src/main.rs"
+
+[dependencies]
+sdk = { path = "../../packages/sdk" }
+ui = { path = "../../packages/ui" }
+orchestrator = { path = "../../packages/orchestrator" }
+voice-runtime = { path = "../../packages/voice-runtime" }
+desktop-runtime = { path = "../../packages/desktop-runtime" }
+browser-runtime = { path = "../../packages/browser-runtime" }
+automation = { path = "../../packages/automation" }
+model-runtime = { path = "../../packages/model-runtime" }
+model-providers = { path = "../../packages/model-providers" }
+memory = { path = "../../packages/memory" }
+context-engine = { path = "../../packages/context-engine" }
+tool-registry = { path = "../../packages/tool-registry" }
+services = { path = "../../packages/services" }
+runtime = { path = "../../packages/runtime" }
+configuration = { path = "../../packages/configuration" }
+logging = { path = "../../packages/logging" }
+
+[dev-dependencies]
+kernel = { path = "../../packages/kernel" }

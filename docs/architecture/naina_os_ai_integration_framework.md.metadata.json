@@ -1,0 +1,6 @@
+{
+  "summary": "NAINA OS AI Integration Framework (AIIF v1.0) — Volume 3. Comprehensive engineering specification detailing ADR-011 external framework adapter design, Computer Use Engine (OpenClaw), Conversational Intelligence (Hermes), Model Router, Ollama, Qwen, Faster-Whisper, Kokoro, and modular adapters for DeepSeek, Llama, Claude, and GPT.",
+  "updatedAt": "2026-07-31T16:23:17.630540300Z",
+  "requestFeedback": true,
+  "userFacing": true
+}

@@ -1,0 +1,32 @@
+[workspace]
+members = [
+    "packages/configuration",
+    "packages/logging",
+    "packages/event-bus",
+    "packages/capabilities",
+    "packages/kernel",
+    "packages/runtime",
+    "packages/services",
+    "packages/tool-registry",
+    "packages/memory",
+    "packages/context-engine",
+    "packages/model-runtime",
+    "packages/model-providers",
+    "packages/orchestrator",
+    "packages/voice-runtime",
+    "packages/desktop-runtime",
+    "packages/browser-runtime",
+    "packages/automation",
+    "packages/sdk",
+    "packages/ui",
+    "apps/desktop",
+]
+resolver = "2"
+
+[profile.dev.package.llama-cpp-sys-2]
+opt-level = 3
+debug = false
+
+[profile.test.package.llama-cpp-sys-2]
+opt-level = 3
+debug = false

@@ -1,0 +1,13 @@
+[package]
+name = "services"
+version = "0.1.0"
+edition = "2024"
+description = "Service registry and discovery management framework for NAINA OS"
+readme = "README.md"
+
+[dependencies]
+runtime = { path = "../runtime" }
+capabilities = { path = "../capabilities" }
+
+[dev-dependencies]
+kernel = { path = "../kernel" }

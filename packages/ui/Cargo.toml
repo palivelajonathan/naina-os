@@ -1,0 +1,13 @@
+[package]
+name = "ui"
+version = "0.1.0"
+edition = "2021"
+description = "NAINA OS client user interface framework package"
+
+[dependencies]
+runtime = { path = "../runtime" }
+configuration = { path = "../configuration" }
+logging = { path = "../logging" }
+
+[dev-dependencies]
+kernel = { path = "../kernel" }

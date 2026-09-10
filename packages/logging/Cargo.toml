@@ -1,0 +1,9 @@
+[package]
+name = "logging"
+version = "0.1.0"
+edition = "2024"
+description = "Logging interface and core types for NAINA OS"
+readme = "README.md"
+
+[dependencies]
+configuration = { path = "../configuration" }

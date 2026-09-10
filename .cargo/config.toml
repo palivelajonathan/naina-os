@@ -1,0 +1,5 @@
+[env]
+LIBCLANG_PATH = "C:\\naina-os\\target\\libclang\\bin"
+CMAKE_BUILD_PARALLEL_LEVEL = "4"
+CFLAGS = "/MD"
+CXXFLAGS = "/MD"

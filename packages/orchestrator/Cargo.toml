@@ -1,0 +1,18 @@
+[package]
+name = "orchestrator"
+version = "0.1.0"
+edition = "2021"
+description = "Top-level agent execution orchestration and cognitive pipeline supervisor for NAINA OS"
+
+[dependencies]
+runtime = { path = "../runtime" }
+memory = { path = "../memory" }
+context-engine = { path = "../context-engine" }
+model-runtime = { path = "../model-runtime" }
+tool-registry = { path = "../tool-registry" }
+configuration = { path = "../configuration" }
+logging = { path = "../logging" }
+
+[dev-dependencies]
+kernel = { path = "../kernel" }
+model-providers = { path = "../model-providers" }

@@ -1,0 +1,10 @@
+[package]
+name = "model-runtime"
+version = "0.1.0"
+edition = "2024"
+description = "Model execution runtime, LLM inference dispatching, and model lifecycle management for NAINA OS"
+readme = "README.md"
+
+[dependencies]
+configuration = { path = "../configuration" }
+logging = { path = "../logging" }

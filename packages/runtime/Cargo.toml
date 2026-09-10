@@ -1,0 +1,9 @@
+[package]
+name = "runtime"
+version = "0.1.0"
+edition = "2024"
+description = "Unified runtime execution framework for NAINA OS"
+readme = "README.md"
+
+[dependencies]
+kernel = { path = "../kernel" }

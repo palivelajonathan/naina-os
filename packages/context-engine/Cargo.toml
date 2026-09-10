@@ -1,0 +1,11 @@
+[package]
+name = "context-engine"
+version = "0.1.0"
+edition = "2024"
+description = "Multi-turn conversation context management and prompt context assembly for NAINA OS"
+readme = "README.md"
+
+[dependencies]
+memory = { path = "../memory" }
+configuration = { path = "../configuration" }
+logging = { path = "../logging" }

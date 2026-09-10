@@ -1,0 +1,6 @@
+{
+  "summary": "NAINA OS Kernel & Runtime Specification (NKRS v1.0) — Volume 2. Comprehensive, enterprise-grade engineering specification covering Microkernel architecture, Kernel responsibilities, 10-stage boot sequence, 11 core kernel components, state machine, event bus engine, priority scheduler, multi-tiered recovery system, security/sandbox model, 10 formal ADRs, Python/TypeScript interfaces, and future edge expansion.",
+  "updatedAt": "2026-07-31T16:17:12.058911100Z",
+  "requestFeedback": true,
+  "userFacing": true
+}

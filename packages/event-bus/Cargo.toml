@@ -1,0 +1,9 @@
+[package]
+name = "event-bus"
+version = "0.1.0"
+edition = "2024"
+description = "Event bus interface and core types for NAINA OS"
+readme = "README.md"
+
+[dependencies]
+logging = { path = "../logging" }

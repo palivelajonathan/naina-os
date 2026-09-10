@@ -1,0 +1,14 @@
+[package]
+name = "automation"
+version = "0.1.0"
+edition = "2021"
+description = "NAINA OS multi-step workflow automation engine package"
+
+[dependencies]
+runtime = { path = "../runtime" }
+services = { path = "../services" }
+configuration = { path = "../configuration" }
+logging = { path = "../logging" }
+
+[dev-dependencies]
+kernel = { path = "../kernel" }

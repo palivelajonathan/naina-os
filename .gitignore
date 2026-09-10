@@ -1,0 +1,35 @@
+# Ignore Rust build artifacts
+/target/
+
+# Ignore local AI model weights and binaries (>100MB)
+/models/
+*.bin
+*.gguf
+*.onnx
+
+# Ignore profiling traces and diagnostics
+*.nsys-rep
+*.sqlite
+
+# Ignore editor and OS temp files
+.DS_Store
+Thumbs.db
+.vscode/
+
+# Ignore IDE agent state
+.agents/
+skills-lock.json
+
+# Exclude unrelated Whop template artifacts
+ARCHITECTURE.md
+whop.app.json
+package.json
+tsconfig.json
+vite.config.ts
+index.html
+/src/
+pnpm-workspace.yaml
+.prettierrc
+.prettierignore
+.env*
+

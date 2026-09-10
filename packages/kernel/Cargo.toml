@@ -1,0 +1,12 @@
+[package]
+name = "kernel"
+version = "0.1.0"
+edition = "2024"
+description = "Microkernel NKRS process supervisor and lifecycle management for NAINA OS"
+readme = "README.md"
+
+[dependencies]
+configuration = { path = "../configuration" }
+logging = { path = "../logging" }
+event-bus = { path = "../event-bus" }
+capabilities = { path = "../capabilities" }

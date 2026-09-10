@@ -1,0 +1,13 @@
+[package]
+name = "tool-registry"
+version = "0.1.0"
+edition = "2024"
+description = "Capability-controlled tool registration and discovery for NAINA OS"
+readme = "README.md"
+
+[dependencies]
+capabilities = { path = "../capabilities" }
+runtime = { path = "../runtime" }
+
+[dev-dependencies]
+kernel = { path = "../kernel" }

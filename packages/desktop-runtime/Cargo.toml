@@ -1,0 +1,14 @@
+[package]
+name = "desktop-runtime"
+version = "0.1.0"
+edition = "2021"
+description = "Desktop overlay and system automation runtime manager (Win32 & UI Automation) for NAINA OS"
+
+[dependencies]
+runtime = { path = "../runtime" }
+services = { path = "../services" }
+configuration = { path = "../configuration" }
+logging = { path = "../logging" }
+
+[dev-dependencies]
+kernel = { path = "../kernel" }

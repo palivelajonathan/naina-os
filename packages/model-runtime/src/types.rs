@@ -56,6 +56,14 @@ pub struct ModelResponse {
     pub usage: Option<TokenUsage>,
 }
 
+/// Detailed inference response payload with latency breakdown.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DetailedModelResponse {
+    pub response: ModelResponse,
+    pub ttft: std::time::Duration,
+    pub token_generation_duration: std::time::Duration,
+}
+
 /// Token streaming handle wrapping a thread-safe token receiver.
 #[derive(Debug)]
 pub struct TokenStream {

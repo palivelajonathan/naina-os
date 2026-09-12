@@ -66,6 +66,8 @@ pub struct CognitiveTurnResult {
     pub stt_latency_ms: u64,
     pub llm_response: model_runtime::ModelResponse,
     pub llm_latency_ms: u64,
+    pub llm_ttft_ms: u64,
+    pub llm_tokens_per_sec: f64,
     pub synthesis: SynthesisResult,
     pub tts_latency_ms: u64,
     pub total_latency_ms: u64,

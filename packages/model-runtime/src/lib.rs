@@ -11,5 +11,6 @@ pub use error::{ModelRuntimeError, Result};
 pub use model_runtime::{ModelRuntime, ModelState};
 pub use traits::ModelProvider;
 pub use types::{
-    FinishReason, InferenceParams, ModelRequest, ModelResponse, TokenStream, TokenUsage,
+    DetailedModelResponse, FinishReason, InferenceParams, ModelRequest, ModelResponse, TokenStream,
+    TokenUsage,
 };

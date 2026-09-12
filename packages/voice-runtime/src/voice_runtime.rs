@@ -303,12 +303,22 @@ impl VoiceRuntime {
         };
 
         let llm_start = Instant::now();
-        let llm_response = model_provider.generate(&req).map_err(|e| {
-            VoiceRuntimeError::SttTranscriptionFailed {
+        let detailed_llm = model_provider
+            .generate_detailed_metrics(&req)
+            .map_err(|e| VoiceRuntimeError::SttTranscriptionFailed {
                 message: format!("LLM reasoning failed: {e}"),
-            }
-        })?;
+            })?;
         let llm_latency_ms = llm_start.elapsed().as_millis() as u64;
+        let llm_response = detailed_llm.response;
+        let llm_ttft_ms = detailed_llm.ttft.as_millis() as u64;
+        let llm_tokens_per_sec = if detailed_llm.token_generation_duration.as_secs_f64() > 0.0 {
+            llm_response.tokens_generated.saturating_sub(1) as f64
+                / detailed_llm.token_generation_duration.as_secs_f64()
+        } else if llm_latency_ms > 0 {
+            llm_response.tokens_generated as f64 / (llm_latency_ms as f64 / 1000.0)
+        } else {
+            0.0
+        };
 
         if self.cancel_flag.load(Ordering::SeqCst) {
             return Err(VoiceRuntimeError::BargeInInterrupted);
@@ -332,6 +342,8 @@ impl VoiceRuntime {
             stt_latency_ms,
             llm_response,
             llm_latency_ms,
+            llm_ttft_ms,
+            llm_tokens_per_sec,
             synthesis,
             tts_latency_ms,
             total_latency_ms,

@@ -1,7 +1,7 @@
 //! Trait abstractions for NAINA OS model providers.
 
 use crate::error::Result;
-use crate::types::{ModelRequest, ModelResponse, TokenStream};
+use crate::types::{DetailedModelResponse, ModelRequest, ModelResponse, TokenStream};
 use std::fmt::Debug;
 
 /// Interface contract (`IModelAdapter`) implemented by concrete model adapters in `model-providers`.
@@ -20,6 +20,16 @@ pub trait ModelProvider: Send + Sync + Debug {
 
     /// Executes a synchronous inference generation request.
     fn generate(&self, request: &ModelRequest) -> Result<ModelResponse>;
+
+    /// Executes an inference generation request returning detailed latency breakdown metrics.
+    fn generate_detailed_metrics(&self, request: &ModelRequest) -> Result<DetailedModelResponse> {
+        let resp = self.generate(request)?;
+        Ok(DetailedModelResponse {
+            response: resp,
+            ttft: std::time::Duration::from_secs(0),
+            token_generation_duration: std::time::Duration::from_secs(0),
+        })
+    }
 
     /// Executes a streaming inference request returning a [`TokenStream`].
     fn generate_stream(&self, request: &ModelRequest) -> Result<TokenStream>;

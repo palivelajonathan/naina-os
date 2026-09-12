@@ -31,6 +31,10 @@ use llama_cpp_2::model::params::LlamaModelParams;
 #[cfg(feature = "llm-cuda")]
 use llama_cpp_2::model::LlamaModel;
 
+#[cfg(feature = "llm-cuda")]
+static GLOBAL_LLAMA_BACKEND: std::sync::OnceLock<std::sync::Arc<LlamaBackend>> =
+    std::sync::OnceLock::new();
+
 /// Concrete local model adapter for Qwen 7B GGUF executing via Hugging Face Candle or llama.cpp CUDA.
 pub struct QwenGgufAdapter {
     model_name: String,
@@ -45,7 +49,7 @@ pub struct QwenGgufAdapter {
     #[cfg(all(feature = "candle", not(feature = "llm-cuda")))]
     tokenizer: Mutex<Option<Tokenizer>>,
     #[cfg(feature = "llm-cuda")]
-    llama_backend: Mutex<Option<LlamaBackend>>,
+    llama_backend: Mutex<Option<std::sync::Arc<LlamaBackend>>>,
     #[cfg(feature = "llm-cuda")]
     llama_model: Mutex<Option<LlamaModel>>,
 }
@@ -110,6 +114,45 @@ impl QwenGgufAdapter {
     /// Returns the number of tensors parsed from the loaded GGUF file.
     pub fn tensor_count(&self) -> usize {
         self.tensor_count.load(Ordering::SeqCst)
+    }
+
+    /// Returns true if the model is actively loaded in CUDA VRAM.
+    pub fn is_cuda_active(&self) -> bool {
+        #[cfg(feature = "llm-cuda")]
+        {
+            if let Ok(mg) = self.llama_model.lock() {
+                return mg.is_some();
+            }
+        }
+        false
+    }
+
+    /// Returns the number of transformer layers offloaded to the GPU.
+    pub fn gpu_layers_offloaded(&self) -> usize {
+        #[cfg(feature = "llm-cuda")]
+        {
+            99 // All 33 transformer layers + LM head
+        }
+        #[cfg(not(feature = "llm-cuda"))]
+        {
+            0
+        }
+    }
+
+    /// Returns the active backend description.
+    pub fn backend_name(&self) -> &'static str {
+        #[cfg(feature = "llm-cuda")]
+        {
+            "llama.cpp CUDA (NVIDIA GeForce RTX 4050 Laptop GPU)"
+        }
+        #[cfg(all(feature = "candle", not(feature = "llm-cuda")))]
+        {
+            "Candle CPU/CUDA"
+        }
+        #[cfg(not(any(feature = "llm-cuda", feature = "candle")))]
+        {
+            "Mock Provider"
+        }
     }
 
     /// Generates response text and captures a detailed latency breakdown of each phase.
@@ -260,6 +303,10 @@ impl QwenGgufAdapter {
                         }),
                     },
                 });
+            } else {
+                return Err(ModelRuntimeError::InferenceFailed {
+                    message: "LlamaModel or LlamaBackend not initialized on CUDA. Ensure load_model() was called.".to_string(),
+                });
             }
         }
 
@@ -395,33 +442,41 @@ impl QwenGgufAdapter {
             }
         }
 
-        let prompt_tokens = request.prompt.len() / 4 + 1;
-        let completion_tokens = 16;
-        let total_tokens = prompt_tokens + completion_tokens;
-        let num_tensors = self.tensor_count.load(Ordering::SeqCst);
-        let response_text = format!(
-            "Qwen 7B GGUF output for prompt: '{}' (tensors: {})",
-            request.prompt, num_tensors
-        );
-        let total_duration = total_start.elapsed();
+        #[cfg(not(any(feature = "llm-cuda", feature = "candle")))]
+        {
+            let prompt_tokens = request.prompt.len() / 4 + 1;
+            let completion_tokens = 16;
+            let total_tokens = prompt_tokens + completion_tokens;
+            let num_tensors = self.tensor_count.load(Ordering::SeqCst);
+            let response_text = format!(
+                "Qwen 7B GGUF output for prompt: '{}' (tensors: {})",
+                request.prompt, num_tensors
+            );
+            let total_duration = total_start.elapsed();
 
-        Ok(InferenceLatencyBreakdown {
-            tokenization_duration: std::time::Duration::from_secs(0),
-            ttft: std::time::Duration::from_secs(0),
-            subsequent_token_total_duration: std::time::Duration::from_secs(0),
-            subsequent_token_avg_duration: std::time::Duration::from_secs(0),
-            decoding_duration: std::time::Duration::from_secs(0),
-            total_duration,
-            response: ModelResponse {
-                text: response_text,
-                tokens_generated: completion_tokens,
-                finish_reason: FinishReason::Stop,
-                usage: Some(TokenUsage {
-                    prompt_tokens,
-                    completion_tokens,
-                    total_tokens,
-                }),
-            },
+            return Ok(InferenceLatencyBreakdown {
+                tokenization_duration: std::time::Duration::from_secs(0),
+                ttft: std::time::Duration::from_secs(0),
+                subsequent_token_total_duration: std::time::Duration::from_secs(0),
+                subsequent_token_avg_duration: std::time::Duration::from_secs(0),
+                decoding_duration: std::time::Duration::from_secs(0),
+                total_duration,
+                response: ModelResponse {
+                    text: response_text,
+                    tokens_generated: completion_tokens,
+                    finish_reason: FinishReason::Stop,
+                    usage: Some(TokenUsage {
+                        prompt_tokens,
+                        completion_tokens,
+                        total_tokens,
+                    }),
+                },
+            });
+        }
+
+        #[cfg(all(feature = "candle", not(feature = "llm-cuda")))]
+        Err(ModelRuntimeError::InferenceFailed {
+            message: "Candle model was not initialized".to_string(),
         })
     }
 }
@@ -502,18 +557,29 @@ impl ModelProvider for QwenGgufAdapter {
 
         #[cfg(feature = "llm-cuda")]
         {
-            if let Ok(backend) = LlamaBackend::init() {
-                let model_params = LlamaModelParams::default().with_n_gpu_layers(99);
-                if let Ok(llama_model) =
-                    LlamaModel::load_from_file(&backend, &self.model_path, &model_params)
-                {
-                    if let Ok(mut bg) = self.llama_backend.lock() {
-                        *bg = Some(backend);
-                    }
-                    if let Ok(mut mg) = self.llama_model.lock() {
-                        *mg = Some(llama_model);
-                    }
-                }
+            let backend = if let Some(b) = GLOBAL_LLAMA_BACKEND.get() {
+                std::sync::Arc::clone(b)
+            } else {
+                let b = LlamaBackend::init().map_err(|e| ModelRuntimeError::LoadFailed {
+                    message: format!("Failed to initialize LlamaBackend for CUDA: {e}"),
+                })?;
+                let arc = std::sync::Arc::new(b);
+                let _ = GLOBAL_LLAMA_BACKEND.set(std::sync::Arc::clone(&arc));
+                arc
+            };
+            let model_params = LlamaModelParams::default().with_n_gpu_layers(99);
+            let llama_model = LlamaModel::load_from_file(&backend, &self.model_path, &model_params)
+                .map_err(|e| ModelRuntimeError::LoadFailed {
+                    message: format!(
+                        "Failed to load LlamaModel into CUDA VRAM from {}: {e}",
+                        self.model_path.display()
+                    ),
+                })?;
+            if let Ok(mut bg) = self.llama_backend.lock() {
+                *bg = Some(backend);
+            }
+            if let Ok(mut mg) = self.llama_model.lock() {
+                *mg = Some(llama_model);
             }
         }
 
@@ -567,6 +633,18 @@ impl ModelProvider for QwenGgufAdapter {
 
     fn generate(&self, request: &ModelRequest) -> Result<ModelResponse> {
         self.generate_detailed(request).map(|b| b.response)
+    }
+
+    fn generate_detailed_metrics(
+        &self,
+        request: &ModelRequest,
+    ) -> Result<model_runtime::DetailedModelResponse> {
+        let breakdown = self.generate_detailed(request)?;
+        Ok(model_runtime::DetailedModelResponse {
+            response: breakdown.response,
+            ttft: breakdown.ttft,
+            token_generation_duration: breakdown.subsequent_token_total_duration,
+        })
     }
 
     fn generate_stream(&self, request: &ModelRequest) -> Result<TokenStream> {

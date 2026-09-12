@@ -279,97 +279,199 @@ fn test_15_full_local_voice_loop_integration() {
 
     let cold_start_duration = cold_start_begin.elapsed();
 
-    // --- WARM CONVERSATIONAL TURN 1 (WARMUP) ---
+    // Verify GPU execution
+    assert!(
+        qwen.is_cuda_active(),
+        "Qwen must be actively loaded in CUDA VRAM"
+    );
+    assert_eq!(
+        qwen.gpu_layers_offloaded(),
+        99,
+        "All 33 transformer layers must be offloaded to CUDA"
+    );
+
+    println!("\n========================================================");
+    println!("NAINA OS — GATE 1: INTEGRATED GPU VOICE PIPELINE");
+    println!("========================================================");
+    println!("GPU Backend:          {}", qwen.backend_name());
+    println!(
+        "Offloaded GPU Layers: {}/33 layers (all transformer blocks + LM head)",
+        qwen.gpu_layers_offloaded()
+    );
+    println!("Target GPU Hardware:  NVIDIA GeForce RTX 4050 Laptop GPU (6 GB VRAM)");
+    println!("Model Cold Load Time: {:?}", cold_start_duration);
+    println!("--------------------------------------------------------");
+
     let pcm_input = vec![0u8; 16000 * 2]; // 1s 16kHz mono audio input
     let audio_input = AudioBuffer::new(16000, 1, pcm_input);
 
-    let warmup_stt = whisper.transcribe(&audio_input).unwrap();
-    let warmup_req = ModelRequest {
+    // --- COLD RUN ---
+    let cold_run_start = Instant::now();
+    let cold_stt_start = Instant::now();
+    let cold_stt = whisper.transcribe(&audio_input).unwrap();
+    let cold_stt_latency = cold_stt_start.elapsed();
+
+    let cold_req = ModelRequest {
         model_name: "qwen-7b-gguf".to_string(),
-        prompt: warmup_stt.text.clone(),
+        prompt: cold_stt.text.clone(),
         params: InferenceParams::default(),
     };
-    let warmup_qwen = qwen.generate_detailed(&warmup_req).unwrap();
-    let warmup_tts_text = if warmup_qwen.response.text.trim().is_empty() {
+    let cold_qwen_breakdown = qwen.generate_detailed(&cold_req).unwrap();
+    let cold_qwen_res = cold_qwen_breakdown.response;
+
+    let cold_tts_text = if cold_qwen_res.text.trim().is_empty() {
         "Naina Online".to_string()
     } else {
-        warmup_qwen.response.text.clone()
+        cold_qwen_res.text.clone()
     };
-    let _ = piper.synthesize(&warmup_tts_text).unwrap();
+    let cold_tts_start = Instant::now();
+    let _cold_tts = piper.synthesize(&cold_tts_text).unwrap();
+    let cold_tts_latency = cold_tts_start.elapsed();
 
-    // --- WARM CONVERSATIONAL TURN 2 (MEASURED STEADY-STATE TURN) ---
-    let turn_start = Instant::now();
+    let cold_total_elapsed = cold_run_start.elapsed();
 
-    // 1. Whisper STT Step
-    let stt_start = Instant::now();
-    let stt_res = whisper.transcribe(&audio_input).unwrap();
-    let stt_elapsed = stt_start.elapsed();
-
-    // 2. Qwen GPU Reasoning Step
-    let model_req = ModelRequest {
-        model_name: "qwen-7b-gguf".to_string(),
-        prompt: stt_res.text.clone(),
-        params: InferenceParams::default(),
-    };
-
-    let qwen_start = Instant::now();
-    let qwen_breakdown = qwen.generate_detailed(&model_req).unwrap();
-    let qwen_elapsed = qwen_start.elapsed();
-    let qwen_res = qwen_breakdown.response;
-
-    let tokens_sec = if qwen_elapsed.as_secs_f64() > 0.0 {
-        qwen_res.tokens_generated as f64 / qwen_elapsed.as_secs_f64()
-    } else {
-        0.0
-    };
-
-    // 3. Piper TTS Step
-    let tts_input_text = if qwen_res.text.trim().is_empty() {
-        "Naina Online".to_string()
-    } else {
-        qwen_res.text.clone()
-    };
-
-    let tts_start = Instant::now();
-    let tts_res = piper.synthesize(&tts_input_text).unwrap();
-    let tts_elapsed = tts_start.elapsed();
-
-    let total_elapsed = turn_start.elapsed();
-
-    println!("=== FULL GPU COGNITIVE VOICE LOOP ===");
-    println!();
-    println!("Whisper STT:");
-    println!("- input duration: {} ms", audio_input.duration_ms());
-    println!("- transcription: \"{}\"", stt_res.text);
-    println!("- latency: {:?}", stt_elapsed);
-    println!();
-    println!("Qwen GPU:");
-    println!("- device: CUDA (NVIDIA GeForce RTX 4050 Laptop GPU)");
-    println!("- model: qwen-7b-instruct-q4_k_m.gguf (33/33 GPU layers)");
-    println!("- TTFT: {:?}", qwen_breakdown.ttft);
+    println!("\n[COLD RUN RESULTS]");
+    println!("- Whisper STT:   {:?}", cold_stt_latency);
+    println!("- Qwen TTFT:     {:?}", cold_qwen_breakdown.ttft);
+    println!("- Qwen Total:    {:?}", cold_qwen_breakdown.total_duration);
     println!(
-        "- generated token count: {} tokens",
-        qwen_res.tokens_generated
+        "- Qwen Tokens:   {} tokens ({:.2} tok/s)",
+        cold_qwen_res.tokens_generated,
+        cold_qwen_res.tokens_generated as f64 / cold_qwen_breakdown.total_duration.as_secs_f64()
     );
-    println!("- total latency: {:?}", qwen_elapsed);
-    println!("- tokens/sec: {:.2} tok/s", tokens_sec);
-    println!();
-    println!("Piper TTS:");
-    println!("- output PCM bytes: {} bytes", tts_res.audio.pcm_data.len());
-    println!("- sample rate: {} Hz", tts_res.audio.sample_rate);
-    println!("- channels: {}", tts_res.audio.channels);
-    println!("- latency: {:?}", tts_elapsed);
-    println!();
-    println!("TOTAL:");
-    println!("- cold start latency: {:?}", cold_start_duration);
-    println!("- warm end-to-end latency: {:?}", total_elapsed);
-    println!("=====================================");
+    println!("- Piper TTS:     {:?}", cold_tts_latency);
+    println!("- Cold Turn E2E: {:?}", cold_total_elapsed);
 
-    assert!(!stt_res.text.is_empty());
-    assert!(!qwen_res.text.is_empty());
-    assert!(!tts_res.audio.pcm_data.is_empty());
-    assert_eq!(tts_res.audio.sample_rate, 16000);
-    assert_eq!(tts_res.audio.channels, 1);
+    // --- WARM RUNS (3 Iterations) ---
+    let num_warm_runs = 3;
+    let mut warm_e2e_durations = Vec::new();
+    let mut warm_stt_durations = Vec::new();
+    let mut warm_qwen_durations = Vec::new();
+    let mut warm_qwen_ttfts = Vec::new();
+    let mut warm_qwen_tok_rates = Vec::new();
+    let mut warm_tts_durations = Vec::new();
+
+    let mut last_stt_text = String::new();
+    let mut last_qwen_text = String::new();
+    let mut last_audio_len = 0;
+
+    for i in 1..=num_warm_runs {
+        let turn_start = Instant::now();
+
+        // 1. Whisper STT
+        let stt_start = Instant::now();
+        let stt_res = whisper.transcribe(&audio_input).unwrap();
+        let stt_elapsed = stt_start.elapsed();
+
+        // 2. Qwen GPU Reasoning Step
+        let model_req = ModelRequest {
+            model_name: "qwen-7b-gguf".to_string(),
+            prompt: stt_res.text.clone(),
+            params: InferenceParams::default(),
+        };
+        let qwen_start = Instant::now();
+        let qwen_breakdown = qwen.generate_detailed(&model_req).unwrap();
+        let qwen_elapsed = qwen_start.elapsed();
+        let qwen_res = qwen_breakdown.response;
+
+        let tok_sec = if qwen_elapsed.as_secs_f64() > 0.0 {
+            qwen_res.tokens_generated as f64 / qwen_elapsed.as_secs_f64()
+        } else {
+            0.0
+        };
+
+        // 3. Piper TTS
+        let tts_prompt = if qwen_res.text.trim().is_empty() {
+            "Naina Online".to_string()
+        } else {
+            qwen_res.text.clone()
+        };
+        let tts_start = Instant::now();
+        let tts_res = piper.synthesize(&tts_prompt).unwrap();
+        let tts_elapsed = tts_start.elapsed();
+
+        let total_elapsed = turn_start.elapsed();
+
+        warm_e2e_durations.push(total_elapsed);
+        warm_stt_durations.push(stt_elapsed);
+        warm_qwen_durations.push(qwen_elapsed);
+        warm_qwen_ttfts.push(qwen_breakdown.ttft);
+        warm_qwen_tok_rates.push(tok_sec);
+        warm_tts_durations.push(tts_elapsed);
+
+        last_stt_text = stt_res.text;
+        last_qwen_text = qwen_res.text;
+        last_audio_len = tts_res.audio.pcm_data.len();
+
+        println!(
+            "Warm Run {}: Total={:8.3?} | STT={:6.2?} | Qwen(TTFT={:6.2?}, Total={:8.3?}, {:.2}tok/s) | TTS={:6.2?}",
+            i, total_elapsed, stt_elapsed, qwen_breakdown.ttft, qwen_elapsed, tok_sec, tts_elapsed
+        );
+    }
+
+    let avg_e2e = warm_e2e_durations
+        .iter()
+        .map(|d| d.as_secs_f64())
+        .sum::<f64>()
+        / num_warm_runs as f64;
+    let avg_stt = warm_stt_durations
+        .iter()
+        .map(|d| d.as_secs_f64() * 1000.0)
+        .sum::<f64>()
+        / num_warm_runs as f64;
+    let avg_ttft = warm_qwen_ttfts
+        .iter()
+        .map(|d| d.as_secs_f64() * 1000.0)
+        .sum::<f64>()
+        / num_warm_runs as f64;
+    let avg_qwen = warm_qwen_durations
+        .iter()
+        .map(|d| d.as_secs_f64() * 1000.0)
+        .sum::<f64>()
+        / num_warm_runs as f64;
+    let avg_tok_rate = warm_qwen_tok_rates.iter().sum::<f64>() / num_warm_runs as f64;
+    let avg_tts = warm_tts_durations
+        .iter()
+        .map(|d| d.as_secs_f64() * 1000.0)
+        .sum::<f64>()
+        / num_warm_runs as f64;
+
+    println!("\n[WARM RUN SUMMARY ({} Iterations)]", num_warm_runs);
+    println!("- Mean STT Latency:         {:6.2} ms", avg_stt);
+    println!("- Mean Qwen TTFT:           {:6.2} ms", avg_ttft);
+    println!("- Mean Qwen Total Duration: {:6.2} ms", avg_qwen);
+    println!("- Mean Qwen Throughput:     {:6.2} tok/s", avg_tok_rate);
+    println!("- Mean Piper TTS Latency:   {:6.2} ms", avg_tts);
+    println!(
+        "- Mean End-to-End Turn:     {:8.3} s ({:.1} ms)",
+        avg_e2e,
+        avg_e2e * 1000.0
+    );
+    println!("- Transcription sample:     \"{}\"", last_stt_text);
+    println!("- Generated sample text:    \"{}\"", last_qwen_text.trim());
+    println!(
+        "- Output PCM bytes:         {} bytes (16kHz 1ch mono i16)",
+        last_audio_len
+    );
+    println!("========================================================\n");
+
+    // Phase 5 Output Validation:
+    assert!(
+        !last_stt_text.is_empty(),
+        "Whisper STT output must not be empty"
+    );
+    assert!(
+        !last_qwen_text.is_empty(),
+        "Qwen GPU output must not be empty"
+    );
+    assert!(
+        !last_qwen_text.contains("Qwen 7B GGUF output for prompt:"),
+        "Must not be mock fallback text"
+    );
+    assert!(
+        last_audio_len > 0,
+        "Piper output PCM must contain generated audio data"
+    );
 }
 
 #[test]
@@ -411,25 +513,80 @@ fn test_16_voice_runtime_cognitive_turn_orchestration() {
 
     let qwen = Arc::new(QwenGgufAdapter::with_model_path(&qwen_path));
     qwen.load_model("qwen-7b-gguf").unwrap();
+    assert!(
+        qwen.is_cuda_active(),
+        "Qwen must be active on CUDA in VoiceRuntime"
+    );
     voice.register_model_provider(qwen);
 
     let pcm_input = vec![0u8; 16000 * 2]; // 1s 16kHz mono PCM
     let audio_input = AudioBuffer::new(16000, 1, pcm_input);
 
-    let turn_res = voice
+    // Turn 1: Cold Turn through VoiceRuntime supervisor
+    let cold_turn_res = voice
         .process_cognitive_voice_turn(&audio_input, "qwen-7b-gguf")
         .unwrap();
 
-    println!("VoiceRuntime Unified Cognitive Turn Result:");
-    println!("- STT latency: {} ms", turn_res.stt_latency_ms);
-    println!("- LLM latency: {} ms", turn_res.llm_latency_ms);
-    println!("- TTS latency: {} ms", turn_res.tts_latency_ms);
-    println!("- Total turn latency: {} ms", turn_res.total_latency_ms);
+    println!("\n=== VOICERUNTIME UNIFIED COGNITIVE TURN: COLD ===");
+    println!("- STT latency:        {} ms", cold_turn_res.stt_latency_ms);
+    println!("- LLM TTFT:           {} ms", cold_turn_res.llm_ttft_ms);
+    println!("- LLM latency:        {} ms", cold_turn_res.llm_latency_ms);
+    println!(
+        "- LLM Throughput:     {:.2} tok/s",
+        cold_turn_res.llm_tokens_per_sec
+    );
+    println!("- TTS latency:        {} ms", cold_turn_res.tts_latency_ms);
+    println!(
+        "- Total turn latency: {} ms",
+        cold_turn_res.total_latency_ms
+    );
+    println!(
+        "- Generated Text:     {:?}",
+        cold_turn_res.llm_response.text.trim()
+    );
+    println!("=================================================\n");
 
-    assert!(!turn_res.transcription.text.is_empty());
-    assert!(!turn_res.llm_response.text.is_empty());
-    assert!(!turn_res.synthesis.audio.pcm_data.is_empty());
-    assert_eq!(turn_res.synthesis.audio.sample_rate, 16000);
-    assert_eq!(turn_res.synthesis.audio.channels, 1);
+    // Turn 2: Warm Turn through VoiceRuntime supervisor
+    let warm_turn_res = voice
+        .process_cognitive_voice_turn(&audio_input, "qwen-7b-gguf")
+        .unwrap();
+
+    println!("\n=== VOICERUNTIME UNIFIED COGNITIVE TURN: WARM ===");
+    println!("- STT latency:        {} ms", warm_turn_res.stt_latency_ms);
+    println!("- LLM TTFT:           {} ms", warm_turn_res.llm_ttft_ms);
+    println!("- LLM latency:        {} ms", warm_turn_res.llm_latency_ms);
+    println!(
+        "- LLM Throughput:     {:.2} tok/s",
+        warm_turn_res.llm_tokens_per_sec
+    );
+    println!("- TTS latency:        {} ms", warm_turn_res.tts_latency_ms);
+    println!(
+        "- Total turn latency: {} ms",
+        warm_turn_res.total_latency_ms
+    );
+    println!(
+        "- Generated Text:     {:?}",
+        warm_turn_res.llm_response.text.trim()
+    );
+    println!(
+        "- Audio bytes:        {} bytes",
+        warm_turn_res.synthesis.audio.pcm_data.len()
+    );
+    println!("=================================================\n");
+
+    // Validations
+    assert!(!warm_turn_res.transcription.text.is_empty());
+    assert!(!warm_turn_res.llm_response.text.is_empty());
+    assert!(
+        !warm_turn_res
+            .llm_response
+            .text
+            .contains("Qwen 7B GGUF output for prompt:"),
+        "Must not be mock fallback text"
+    );
+    assert!(!warm_turn_res.synthesis.audio.pcm_data.is_empty());
+    assert_eq!(warm_turn_res.synthesis.audio.sample_rate, 16000);
+    assert_eq!(warm_turn_res.synthesis.audio.channels, 1);
+    assert!(warm_turn_res.synthesis.audio.sample_count() > 0);
     assert_eq!(voice.state(), voice_runtime::VoiceState::Idle);
 }

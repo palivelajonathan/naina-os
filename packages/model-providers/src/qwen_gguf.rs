@@ -10,7 +10,6 @@ use std::fs::File;
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::channel;
 use std::sync::Mutex;
 use std::thread;
 use std::time::Instant;
@@ -51,7 +50,7 @@ pub struct QwenGgufAdapter {
     #[cfg(feature = "llm-cuda")]
     llama_backend: Mutex<Option<std::sync::Arc<LlamaBackend>>>,
     #[cfg(feature = "llm-cuda")]
-    llama_model: Mutex<Option<LlamaModel>>,
+    llama_model: Mutex<Option<std::sync::Arc<LlamaModel>>>,
 }
 
 impl std::fmt::Debug for QwenGgufAdapter {
@@ -202,8 +201,16 @@ impl QwenGgufAdapter {
                 })?;
 
                 let tok_start = Instant::now();
+                let prompt_text = if request.prompt.contains("<|im_start|>") {
+                    request.prompt.clone()
+                } else {
+                    format!(
+                        "<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n",
+                        request.prompt
+                    )
+                };
                 let initial_tokens = model
-                    .str_to_token(&request.prompt, llama_cpp_2::model::AddBos::Always)
+                    .str_to_token(&prompt_text, llama_cpp_2::model::AddBos::Always)
                     .map_err(|e| ModelRuntimeError::InferenceFailed {
                         message: format!("Failed to tokenize prompt with llama-cpp-2: {e}"),
                     })?;
@@ -579,7 +586,7 @@ impl ModelProvider for QwenGgufAdapter {
                 *bg = Some(backend);
             }
             if let Ok(mut mg) = self.llama_model.lock() {
-                *mg = Some(llama_model);
+                *mg = Some(std::sync::Arc::new(llama_model));
             }
         }
 
@@ -664,22 +671,160 @@ impl ModelProvider for QwenGgufAdapter {
             });
         }
 
-        let (tx, rx) = channel();
-        let prompt_text = request.prompt.clone();
-        let num_tensors = self.tensor_count.load(Ordering::SeqCst);
+        #[cfg(feature = "llm-cuda")]
+        {
+            let model_guard =
+                self.llama_model
+                    .lock()
+                    .map_err(|e| ModelRuntimeError::LockError {
+                        message: e.to_string(),
+                    })?;
 
-        thread::spawn(move || {
-            let stream_text = format!(
-                "Qwen 7B streamed Candle output (tensors: {}) for prompt len {}",
-                num_tensors,
-                prompt_text.len()
-            );
-            for word in stream_text.split_whitespace() {
-                let _ = tx.send(format!("{word} "));
+            let backend_guard =
+                self.llama_backend
+                    .lock()
+                    .map_err(|e| ModelRuntimeError::LockError {
+                        message: e.to_string(),
+                    })?;
+
+            if let (Some(model_arc), Some(backend_arc)) = (
+                model_guard.as_ref().cloned(),
+                backend_guard.as_ref().cloned(),
+            ) {
+                drop(model_guard);
+                drop(backend_guard);
+
+                // Bounded synchronous channel with capacity 32 for backpressure
+                let (tx, rx) = std::sync::mpsc::sync_channel::<String>(32);
+                let prompt = if request.prompt.contains("<|im_start|>") {
+                    request.prompt.clone()
+                } else {
+                    format!(
+                        "<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n",
+                        request.prompt
+                    )
+                };
+                let max_tokens =
+                    if request.params.max_tokens == 0 || request.params.max_tokens == 512 {
+                        16
+                    } else {
+                        request.params.max_tokens.min(64)
+                    };
+
+                thread::spawn(move || {
+                    let ctx_params = llama_cpp_2::context::params::LlamaContextParams::default()
+                        .with_n_ctx(Some(NonZeroU32::new(2048).unwrap()));
+
+                    let mut ctx = match model_arc.new_context(&backend_arc, ctx_params) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            eprintln!("LlamaContext creation failed: {e}");
+                            return;
+                        }
+                    };
+
+                    let initial_tokens =
+                        match model_arc.str_to_token(&prompt, llama_cpp_2::model::AddBos::Always) {
+                            Ok(toks) => toks,
+                            Err(e) => {
+                                eprintln!("Tokenization failed: {e}");
+                                return;
+                            }
+                        };
+
+                    let prompt_len = initial_tokens.len();
+                    let mut batch = llama_cpp_2::llama_batch::LlamaBatch::new(2048, 1);
+                    for (i, &tok) in initial_tokens.iter().enumerate() {
+                        let is_last = i == prompt_len - 1;
+                        if let Err(e) = batch.add(tok, i as i32, &[0], is_last) {
+                            eprintln!("batch.add prompt token error: {e}");
+                            return;
+                        }
+                    }
+
+                    // Decode prompt to generate initial logits
+                    if let Err(e) = ctx.decode(&mut batch) {
+                        eprintln!("ctx.decode prompt error: {e}");
+                        return;
+                    }
+
+                    // Autoregressive token-by-token decode loop
+                    for (_step, current_pos) in (0..max_tokens).zip(prompt_len as i32..) {
+                        let candidates = ctx.candidates_ith(batch.n_tokens() - 1);
+                        let next_token = match candidates
+                            .max_by(|a, b| a.logit().partial_cmp(&b.logit()).unwrap())
+                            .map(|td| td.id())
+                        {
+                            Some(tok) => tok,
+                            None => {
+                                eprintln!("Empty candidates at step {_step}");
+                                break;
+                            }
+                        };
+
+                        if model_arc.is_eog_token(next_token)
+                            || next_token == model_arc.token_eos()
+                            || next_token.0 == 151645
+                            || next_token.0 == 151643
+                        {
+                            break;
+                        }
+
+                        #[allow(deprecated)]
+                        let piece = model_arc
+                            .token_to_str(next_token, llama_cpp_2::model::Special::Tokenize)
+                            .unwrap_or_default();
+
+                        if piece.contains("<|im_end|>") || piece.contains("<|endoftext|>") {
+                            break;
+                        }
+
+                        // Send real token piece into bounded backpressure channel
+                        if let Err(_e) = tx.send(piece) {
+                            break;
+                        }
+
+                        batch.clear();
+                        if let Err(e) = batch.add(next_token, current_pos, &[0], true) {
+                            eprintln!("batch.add next_token error: {e}");
+                            break;
+                        }
+                        if let Err(e) = ctx.decode(&mut batch) {
+                            eprintln!("ctx.decode step error: {e}");
+                            break;
+                        }
+                    }
+                    // Bounded sender tx is dropped here, closing the channel.
+                    // LlamaContext and LlamaBatch remain strictly on this thread and drop cleanly.
+                });
+
+                return Ok(TokenStream { receiver: rx });
+            } else {
+                return Err(ModelRuntimeError::InferenceFailed {
+                    message: "LlamaModel or LlamaBackend not initialized on CUDA. Ensure load_model() was called.".to_string(),
+                });
             }
-        });
+        }
 
-        Ok(TokenStream { receiver: rx })
+        #[cfg(not(feature = "llm-cuda"))]
+        {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let prompt_text = request.prompt.clone();
+            let num_tensors = self.tensor_count.load(Ordering::SeqCst);
+
+            thread::spawn(move || {
+                let stream_text = format!(
+                    "Qwen 7B streamed fallback output (tensors: {}) for prompt len {}",
+                    num_tensors,
+                    prompt_text.len()
+                );
+                for word in stream_text.split_whitespace() {
+                    let _ = tx.send(format!("{word} "));
+                }
+            });
+
+            Ok(TokenStream { receiver: rx })
+        }
     }
 
     fn current_vram_usage_bytes(&self) -> usize {

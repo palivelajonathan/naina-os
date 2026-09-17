@@ -590,3 +590,480 @@ fn test_16_voice_runtime_cognitive_turn_orchestration() {
     assert!(warm_turn_res.synthesis.audio.sample_count() > 0);
     assert_eq!(voice.state(), voice_runtime::VoiceState::Idle);
 }
+
+#[test]
+fn test_17_token_to_speech_streaming_pipeline_direct() {
+    use model_providers::QwenGgufAdapter;
+    use model_runtime::{InferenceParams, ModelProvider, ModelRequest};
+    use voice_runtime::TextChunker;
+
+    let whisper_path = std::path::PathBuf::from("C:/naina-os/models/whisper-base-en.bin");
+    let qwen_path = std::path::PathBuf::from("C:/naina-os/models/qwen-7b-instruct-q4_k_m.gguf");
+    let piper_path = std::path::PathBuf::from("C:/naina-os/models/piper-en-medium.onnx");
+
+    if !whisper_path.exists() || !qwen_path.exists() || !piper_path.exists() {
+        println!("Skipping direct streaming benchmark: model weights absent");
+        return;
+    }
+
+    let whisper = Arc::new(CandleWhisperSttAdapter::with_model_path(
+        "whisper-base-en",
+        &whisper_path,
+    ));
+    whisper.load_model().unwrap();
+
+    let piper = Arc::new(PiperTtsAdapter::with_model_path(
+        "piper-en-medium",
+        &piper_path,
+    ));
+    piper.load_model().unwrap();
+
+    let qwen = Arc::new(QwenGgufAdapter::with_model_path(&qwen_path));
+    qwen.load_model("qwen-7b-gguf").unwrap();
+    assert!(qwen.is_cuda_active(), "Qwen must be active on CUDA");
+
+    let pcm_input = vec![0u8; 16000 * 2]; // 1s 16kHz mono PCM
+    let audio_input = AudioBuffer::new(16000, 1, pcm_input);
+
+    println!("\n========================================================");
+    println!("=== GATE 2 DIRECT TOKEN-TO-SPEECH STREAMING BENCHMARK ===");
+    println!("========================================================");
+
+    // Warm-up run to ensure CUDA kernels and caches are hot
+    {
+        let model_req = ModelRequest {
+            model_name: "qwen-7b-gguf".to_string(),
+            prompt: "Hello NAINA, how are you today?".to_string(),
+            params: InferenceParams {
+                max_tokens: 16,
+                ..Default::default()
+            },
+        };
+        let stream = qwen.generate_stream(&model_req).unwrap();
+        while let Ok(_) = stream.receiver.recv() {}
+    }
+
+    // Benchmark Run with High-Resolution Milestones
+    let t0 = Instant::now();
+
+    // T1: Whisper STT start
+    let t1 = Instant::now();
+    let stt_res = whisper.transcribe(&audio_input).unwrap();
+    // T2: Whisper STT complete
+    let t2 = Instant::now();
+
+    let model_req = ModelRequest {
+        model_name: "qwen-7b-gguf".to_string(),
+        prompt: stt_res.text.clone(),
+        params: InferenceParams {
+            max_tokens: 16,
+            ..Default::default()
+        },
+    };
+
+    // Bounded channel between Chunker and Piper worker (capacity 8)
+    let (chunk_tx, chunk_rx) = std::sync::mpsc::sync_channel::<(usize, String)>(8);
+    let piper_clone = Arc::clone(&piper);
+
+    // Spawn Piper TTS consumer thread
+    let piper_handle = std::thread::spawn(move || {
+        let mut audio_chunks = Vec::new();
+        let mut t6_first_chunk_start: Option<Instant> = None;
+        let mut t7_first_audio_generated: Option<Instant> = None;
+        let mut t10_final_audio: Option<Instant> = None;
+
+        while let Ok((chunk_idx, chunk_text)) = chunk_rx.recv() {
+            let synth_start = Instant::now();
+            if t6_first_chunk_start.is_none() {
+                t6_first_chunk_start = Some(synth_start);
+            }
+
+            let synth_res = piper_clone.synthesize(&chunk_text).unwrap();
+            let synth_end = Instant::now();
+
+            if t7_first_audio_generated.is_none() {
+                t7_first_audio_generated = Some(synth_end);
+            }
+            t10_final_audio = Some(synth_end);
+
+            let latency = synth_end.duration_since(synth_start).as_millis() as u64;
+            audio_chunks.push((chunk_idx, chunk_text, synth_res.audio, latency));
+        }
+
+        (
+            audio_chunks,
+            t6_first_chunk_start.unwrap_or_else(Instant::now),
+            t7_first_audio_generated.unwrap_or_else(Instant::now),
+            t10_final_audio.unwrap_or_else(Instant::now),
+        )
+    });
+
+    // T3: Qwen generation start
+    let t3 = Instant::now();
+    let token_stream = qwen.generate_stream(&model_req).unwrap();
+
+    let mut chunker = TextChunker::new();
+    let mut token_strings = Vec::new();
+    let mut text_chunks = Vec::new();
+    let mut t4_first_token: Option<Instant> = None;
+    let mut t5_first_chunk: Option<Instant> = None;
+    let mut chunk_counter = 0usize;
+
+    while let Ok(tok) = token_stream.receiver.recv() {
+        if t4_first_token.is_none() {
+            t4_first_token = Some(Instant::now());
+        }
+        token_strings.push(tok.clone());
+
+        let ready = chunker.push(&tok);
+        for c in ready {
+            if t5_first_chunk.is_none() {
+                t5_first_chunk = Some(Instant::now());
+            }
+            text_chunks.push(c.clone());
+            let idx = chunk_counter;
+            chunk_counter += 1;
+            chunk_tx.send((idx, c)).unwrap();
+        }
+    }
+
+    // T9: Qwen final token generated
+    let t9 = Instant::now();
+
+    // Flush final partial chunk from chunker
+    if let Some(final_chunk) = chunker.flush() {
+        if t5_first_chunk.is_none() {
+            t5_first_chunk = Some(Instant::now());
+        }
+        text_chunks.push(final_chunk.clone());
+        let idx = chunk_counter;
+        chunk_tx.send((idx, final_chunk)).unwrap();
+    }
+
+    drop(chunk_tx); // Close channel to signal EOF to Piper worker
+
+    let (audio_chunks, t6, t7, t10) = piper_handle.join().unwrap();
+    let t4 = t4_first_token.unwrap_or(t9);
+    let t5 = t5_first_chunk.unwrap_or(t9);
+    let t8 = t7; // First audio available to output
+
+    // Exact text reconstruction check
+    let full_reconstructed_text = text_chunks.join("");
+    let raw_token_text = token_strings.join("");
+    assert_eq!(
+        full_reconstructed_text, raw_token_text,
+        "Exact text reconstruction invariant violated!"
+    );
+
+    // Composite audio assembly
+    let mut composite_pcm = Vec::new();
+    for (_, _, ref a, _) in &audio_chunks {
+        composite_pcm.extend_from_slice(&a.pcm_data);
+    }
+    assert!(
+        !composite_pcm.is_empty(),
+        "Composite audio must contain synthesized PCM data"
+    );
+
+    // Metrics calculation
+    let ttfa_ms = t8.duration_since(t0).as_secs_f64() * 1000.0;
+    let whisper_ms = t2.duration_since(t1).as_secs_f64() * 1000.0;
+    let qwen_ttft_ms = t4.duration_since(t3).as_secs_f64() * 1000.0;
+    let time_to_first_chunk_ms = t5.duration_since(t0).as_secs_f64() * 1000.0;
+    let piper_first_chunk_ms = t7.duration_since(t6).as_secs_f64() * 1000.0;
+    let qwen_duration_s = t9.duration_since(t3).as_secs_f64();
+    let qwen_tok_rate = token_strings.len() as f64 / qwen_duration_s;
+    let total_completion_ms = t10.duration_since(t0).as_secs_f64() * 1000.0;
+
+    let overlap_start = t6.max(t3);
+    let overlap_end = t10.min(t9);
+    let overlap_duration_ms = if overlap_end > overlap_start {
+        overlap_end.duration_since(overlap_start).as_secs_f64() * 1000.0
+    } else {
+        0.0
+    };
+
+    println!("\n[MILESTONE TIMELINE (Wall-Clock from T0)]");
+    println!("- T0  Request Accepted:             {:8.2} ms (base)", 0.0);
+    println!(
+        "- T1  Whisper STT Start:            {:8.2} ms",
+        t1.duration_since(t0).as_secs_f64() * 1000.0
+    );
+    println!(
+        "- T2  Whisper STT Complete:         {:8.2} ms (Whisper: {:.2} ms)",
+        t2.duration_since(t0).as_secs_f64() * 1000.0,
+        whisper_ms
+    );
+    println!(
+        "- T3  Qwen Generation Start:        {:8.2} ms",
+        t3.duration_since(t0).as_secs_f64() * 1000.0
+    );
+    println!(
+        "- T4  First Qwen Token Decoded:     {:8.2} ms (TTFT: {:.2} ms)",
+        t4.duration_since(t0).as_secs_f64() * 1000.0,
+        qwen_ttft_ms
+    );
+    println!(
+        "- T5  First Text Chunk Ready:       {:8.2} ms (Latency from T0: {:.2} ms, Text: \"{}\")",
+        t5.duration_since(t0).as_secs_f64() * 1000.0,
+        time_to_first_chunk_ms,
+        text_chunks[0].trim()
+    );
+    println!(
+        "- T6  Piper First Chunk Start:      {:8.2} ms",
+        t6.duration_since(t0).as_secs_f64() * 1000.0
+    );
+    println!(
+        "- T7  First Real Audio Generated:   {:8.2} ms (Piper latency: {:.2} ms)",
+        t7.duration_since(t0).as_secs_f64() * 1000.0,
+        piper_first_chunk_ms
+    );
+    println!(
+        "- T8  First Audio Available:        {:8.2} ms [PRIMARY METRIC: TTFA = {:.2} ms]",
+        t8.duration_since(t0).as_secs_f64() * 1000.0,
+        ttfa_ms
+    );
+    println!(
+        "- T9  Qwen Final Token Generated:   {:8.2} ms ({} tokens, {:.2} tok/s)",
+        t9.duration_since(t0).as_secs_f64() * 1000.0,
+        token_strings.len(),
+        qwen_tok_rate
+    );
+    println!(
+        "- T10 Final Piper Audio Ready:      {:8.2} ms (Total turn: {:.2} ms)",
+        t10.duration_since(t0).as_secs_f64() * 1000.0,
+        total_completion_ms
+    );
+
+    println!("\n[INVARIANT & CONCURRENCY VERIFICATION]");
+    println!(
+        "1. Qwen produced incremental tokens:       {} tokens decoded incrementally",
+        token_strings.len()
+    );
+    println!(
+        "2. Piper received chunk before Qwen ended: T5 ({:.2} ms) < T9 ({:.2} ms) [delta: {:.2} ms earlier]",
+        t5.duration_since(t0).as_secs_f64() * 1000.0,
+        t9.duration_since(t0).as_secs_f64() * 1000.0,
+        (t9.duration_since(t5).as_secs_f64() * 1000.0)
+    );
+    println!(
+        "3. Qwen generated while Piper worked:      Overlap duration = {:.2} ms",
+        overlap_duration_ms
+    );
+    println!(
+        "4. First audio BEFORE Qwen final token:    T7 ({:.2} ms) < T9 ({:.2} ms) [delta: {:.2} ms earlier]",
+        t7.duration_since(t0).as_secs_f64() * 1000.0,
+        t9.duration_since(t0).as_secs_f64() * 1000.0,
+        (t9.duration_since(t7).as_secs_f64() * 1000.0)
+    );
+    println!(
+        "5. Exact text reconstruction preserved:    \"{}\"",
+        full_reconstructed_text.trim()
+    );
+    println!(
+        "6. Number of chunks:                       {} chunks (sizes: {:?})",
+        text_chunks.len(),
+        text_chunks.iter().map(|c| c.len()).collect::<Vec<_>>()
+    );
+    println!(
+        "7. Total composite audio:                  {} bytes ({} samples)",
+        composite_pcm.len(),
+        composite_pcm.len() / 2
+    );
+    println!("========================================================\n");
+
+    // Success Assertions
+    assert!(
+        token_strings.len() > 1,
+        "Qwen must produce tokens incrementally"
+    );
+    assert!(t5 < t9, "Piper must receive a chunk before Qwen finishes");
+    assert!(
+        t7 < t9,
+        "First real audio must occur before Qwen's final token"
+    );
+    assert!(
+        overlap_duration_ms > 0.0,
+        "Qwen must generate while Piper works"
+    );
+    assert_eq!(full_reconstructed_text, raw_token_text);
+    assert!(!composite_pcm.is_empty());
+}
+
+#[test]
+fn test_18_voice_runtime_supervisor_streaming_turn() {
+    use model_providers::QwenGgufAdapter;
+    use model_runtime::ModelProvider;
+    use voice_runtime::VoiceRuntime;
+
+    let whisper_path = std::path::PathBuf::from("C:/naina-os/models/whisper-base-en.bin");
+    let qwen_path = std::path::PathBuf::from("C:/naina-os/models/qwen-7b-instruct-q4_k_m.gguf");
+    let piper_path = std::path::PathBuf::from("C:/naina-os/models/piper-en-medium.onnx");
+
+    if !whisper_path.exists() || !qwen_path.exists() || !piper_path.exists() {
+        println!("Skipping VoiceRuntime supervisor streaming test: model weights absent");
+        return;
+    }
+
+    let kernel = Arc::new(kernel::Kernel::new(kernel::KernelConfig::default()));
+    let runtime = Arc::new(runtime::Runtime::new(runtime::RuntimeConfig, kernel));
+    let services = Arc::new(services::ServiceRegistry::new(
+        services::ServicesConfig,
+        Arc::clone(&runtime),
+    ));
+    let voice = VoiceRuntime::with_default_config(runtime, services);
+
+    let whisper = Arc::new(CandleWhisperSttAdapter::with_model_path(
+        "whisper-base-en",
+        &whisper_path,
+    ));
+    whisper.load_model().unwrap();
+    voice.register_stt_engine(whisper);
+
+    let piper = Arc::new(PiperTtsAdapter::with_model_path(
+        "piper-en-medium",
+        &piper_path,
+    ));
+    piper.load_model().unwrap();
+    voice.register_tts_engine(piper);
+
+    let qwen = Arc::new(QwenGgufAdapter::with_model_path(&qwen_path));
+    qwen.load_model("qwen-7b-gguf").unwrap();
+    assert!(
+        qwen.is_cuda_active(),
+        "Qwen must be active on CUDA in VoiceRuntime"
+    );
+    voice.register_model_provider(qwen);
+
+    let pcm_input = vec![0u8; 16000 * 2]; // 1s 16kHz mono PCM
+    let audio_input = AudioBuffer::new(16000, 1, pcm_input);
+
+    println!("\n========================================================");
+    println!("=== GATE 2 VOICERUNTIME SUPERVISOR STREAMING TURN ===");
+    println!("========================================================");
+
+    // Cold Run
+    let cold_res = voice
+        .process_cognitive_voice_turn_stream(&audio_input, "qwen-7b-gguf")
+        .unwrap();
+
+    println!("\n[COLD STREAMING TURN RESULT]");
+    println!(
+        "- Transcription:               \"{}\"",
+        cold_res.transcription.text
+    );
+    println!(
+        "- Full Generated Text:         \"{}\"",
+        cold_res.full_text.trim()
+    );
+    println!("- Total Tokens:                {}", cold_res.total_tokens);
+    println!(
+        "- Chunks Generated:            {}",
+        cold_res.text_chunks.len()
+    );
+    println!(
+        "- Whisper STT Latency:         {:6.2} ms",
+        cold_res.timeline.whisper_latency_ms
+    );
+    println!(
+        "- Qwen TTFT:                   {:6.2} ms",
+        cold_res.timeline.qwen_ttft_ms
+    );
+    println!(
+        "- Time to First Text Chunk:    {:6.2} ms",
+        cold_res.timeline.time_to_first_chunk_ms
+    );
+    println!(
+        "- Piper First Chunk Latency:   {:6.2} ms",
+        cold_res.timeline.piper_first_chunk_latency_ms
+    );
+    println!(
+        "- TIME-TO-FIRST-AUDIO (TTFA):  {:6.2} ms (T8 - T0)",
+        cold_res.timeline.time_to_first_audio_ms
+    );
+    println!(
+        "- Qwen Token Rate:             {:6.2} tok/s",
+        cold_res.timeline.qwen_tokens_per_sec
+    );
+    println!(
+        "- Total Turn Completion:       {:6.2} ms",
+        cold_res.timeline.total_completion_ms
+    );
+    println!(
+        "- Concurrency Overlap:         {:6.2} ms",
+        cold_res.timeline.overlap_duration_ms
+    );
+
+    // Warm Runs (3 Iterations)
+    let num_warm_runs = 3;
+    let mut warm_ttfas = Vec::new();
+    let mut warm_ttfts = Vec::new();
+    let mut warm_stts = Vec::new();
+    let mut warm_tts_firsts = Vec::new();
+    let mut warm_tok_rates = Vec::new();
+    let mut warm_totals = Vec::new();
+    let mut warm_overlaps = Vec::new();
+
+    for i in 1..=num_warm_runs {
+        let warm_res = voice
+            .process_cognitive_voice_turn_stream(&audio_input, "qwen-7b-gguf")
+            .unwrap();
+
+        let tl = &warm_res.timeline;
+        warm_ttfas.push(tl.time_to_first_audio_ms);
+        warm_ttfts.push(tl.qwen_ttft_ms);
+        warm_stts.push(tl.whisper_latency_ms);
+        warm_tts_firsts.push(tl.piper_first_chunk_latency_ms);
+        warm_tok_rates.push(tl.qwen_tokens_per_sec);
+        warm_totals.push(tl.total_completion_ms);
+        warm_overlaps.push(tl.overlap_duration_ms);
+
+        println!(
+            "Warm Run {}: TTFA={:6.2} ms | TTFT={:6.2} ms | PiperChunk={:6.2} ms | Qwen={:5.2} tok/s | Total={:7.2} ms | Overlap={:6.2} ms",
+            i, tl.time_to_first_audio_ms, tl.qwen_ttft_ms, tl.piper_first_chunk_latency_ms, tl.qwen_tokens_per_sec, tl.total_completion_ms, tl.overlap_duration_ms
+        );
+    }
+
+    let avg_ttfa = warm_ttfas.iter().sum::<f64>() / num_warm_runs as f64;
+    let avg_ttft = warm_ttfts.iter().sum::<f64>() / num_warm_runs as f64;
+    let avg_stt = warm_stts.iter().sum::<f64>() / num_warm_runs as f64;
+    let avg_tts_first = warm_tts_firsts.iter().sum::<f64>() / num_warm_runs as f64;
+    let avg_tok_rate = warm_tok_rates.iter().sum::<f64>() / num_warm_runs as f64;
+    let avg_total = warm_totals.iter().sum::<f64>() / num_warm_runs as f64;
+    let avg_overlap = warm_overlaps.iter().sum::<f64>() / num_warm_runs as f64;
+
+    println!("\n[WARM RUN SUMMARY ({} Iterations)]", num_warm_runs);
+    println!("- Mean STT Latency:                {:6.2} ms", avg_stt);
+    println!("- Mean Qwen TTFT:                  {:6.2} ms", avg_ttft);
+    println!(
+        "- Mean Piper First Chunk:          {:6.2} ms",
+        avg_tts_first
+    );
+    println!(
+        "- Mean Qwen Token Rate:            {:6.2} tok/s",
+        avg_tok_rate
+    );
+    println!("- Mean Concurrency Overlap:        {:6.2} ms", avg_overlap);
+    println!("- Mean Total Turn Completion:      {:6.2} ms", avg_total);
+    println!(
+        "- Mean TIME-TO-FIRST-AUDIO (TTFA): {:6.2} ms [Target: < 700 ms]",
+        avg_ttfa
+    );
+    println!("========================================================\n");
+
+    // Success Assertions
+    assert!(!cold_res.full_text.is_empty());
+    assert!(!cold_res.audio_chunks.is_empty());
+    assert!(!cold_res.composite_audio.pcm_data.is_empty());
+    assert_eq!(cold_res.composite_audio.sample_rate, 16000);
+    assert_eq!(cold_res.composite_audio.channels, 1);
+    assert!(cold_res.timeline.time_to_first_audio_ms > 0.0);
+    assert_eq!(voice.state(), voice_runtime::VoiceState::Idle);
+
+    // Alpha Target Assertion: < 700 ms TTFA
+    assert!(
+        avg_ttfa < 700.0,
+        "Measured Time-to-First-Audio ({:.2} ms) must be under 700 ms Alpha SLA target!",
+        avg_ttfa
+    );
+}

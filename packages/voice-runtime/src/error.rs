@@ -13,6 +13,12 @@ pub enum VoiceRuntimeError {
     TtsSynthesisFailed { message: String },
     EngineNotLoaded { engine_name: String },
     InvalidAudioFormat { message: String },
+    AudioDeviceNotFound { name: String },
+    AudioDeviceInitFailed { message: String },
+    AudioStreamStartupFailed { message: String },
+    AudioStreamRuntimeError { message: String },
+    UnsupportedAudioFormat { message: String },
+    AudioDeviceDisconnected { name: String },
     BargeInInterrupted,
     Runtime(runtime::RuntimeError),
     Service(services::ServicesError),
@@ -25,6 +31,24 @@ impl fmt::Display for VoiceRuntimeError {
         match self {
             VoiceRuntimeError::AudioCaptureFailed { message } => {
                 write!(f, "Audio capture failed: {message}")
+            }
+            VoiceRuntimeError::AudioDeviceNotFound { name } => {
+                write!(f, "Audio device not found: {name}")
+            }
+            VoiceRuntimeError::AudioDeviceInitFailed { message } => {
+                write!(f, "Audio device initialization failed: {message}")
+            }
+            VoiceRuntimeError::AudioStreamStartupFailed { message } => {
+                write!(f, "Audio stream startup failed: {message}")
+            }
+            VoiceRuntimeError::AudioStreamRuntimeError { message } => {
+                write!(f, "Audio stream runtime error: {message}")
+            }
+            VoiceRuntimeError::UnsupportedAudioFormat { message } => {
+                write!(f, "Unsupported audio format: {message}")
+            }
+            VoiceRuntimeError::AudioDeviceDisconnected { name } => {
+                write!(f, "Audio device disconnected: {name}")
             }
             VoiceRuntimeError::SttTranscriptionFailed { message } => {
                 write!(f, "STT transcription failed: {message}")

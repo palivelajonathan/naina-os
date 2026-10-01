@@ -10,6 +10,7 @@ services = { path = "../services" }
 configuration = { path = "../configuration" }
 logging = { path = "../logging" }
 model-runtime = { path = "../model-runtime" }
+cpal = "0.18.2"
 candle-core = { version = "0.8", optional = true }
 candle-nn = { version = "0.8", optional = true }
 candle-transformers = { version = "0.8", optional = true }

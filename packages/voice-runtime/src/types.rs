@@ -118,3 +118,66 @@ pub struct StreamingTurnResult {
     pub total_tokens: usize,
     pub timeline: StreamTimeline,
 }
+
+/// Statistics describing a physical microphone capture session.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AudioCaptureStats {
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub samples_captured: usize,
+    pub duration_ms: u64,
+    pub startup_latency_ms: f64,
+}
+
+/// Statistics describing a physical audio playback session.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AudioPlaybackStats {
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub samples_played: usize,
+    pub duration_ms: u64,
+    pub playback_latency_ms: f64,
+}
+
+/// Complete high-resolution hardware and cognitive pipeline timeline (T0 through T13).
+#[derive(Clone, Debug, PartialEq)]
+pub struct LiveStreamTimeline {
+    pub t0_audio_request: std::time::Instant,
+    pub t1_input_stream_started: std::time::Instant,
+    pub t2_first_mic_frame: std::time::Instant,
+    pub t3_capture_completed: std::time::Instant,
+    pub t4_whisper_completed: std::time::Instant,
+    pub t5_qwen_started: std::time::Instant,
+    pub t6_first_qwen_token: std::time::Instant,
+    pub t7_first_text_chunk: std::time::Instant,
+    pub t8_first_piper_chunk: std::time::Instant,
+    pub t9_first_output_pcm_submitted: std::time::Instant,
+    pub t10_first_output_callback: std::time::Instant,
+    pub t11_qwen_final_token: std::time::Instant,
+    pub t12_final_piper_chunk: std::time::Instant,
+    pub t13_output_stream_completed: std::time::Instant,
+
+    pub capture_startup_latency_ms: f64,
+    pub capture_duration_ms: f64,
+    pub whisper_latency_ms: f64,
+    pub qwen_ttft_ms: f64,
+    pub software_ttfa_ms: f64,
+    pub hardware_inclusive_ttfa_ms: f64,
+    pub total_turn_completion_ms: f64,
+    pub overlap_duration_ms: f64,
+    pub qwen_tokens_per_sec: f64,
+}
+
+/// Result produced by a live physical voice turn (Real Mic -> Whisper -> Qwen -> Piper -> Real Speaker).
+#[derive(Clone, Debug, PartialEq)]
+pub struct LiveStreamingTurnResult {
+    pub transcription: TranscriptionResult,
+    pub full_text: String,
+    pub text_chunks: Vec<String>,
+    pub audio_chunks: Vec<SynthesizedAudioChunk>,
+    pub composite_audio: AudioBuffer,
+    pub total_tokens: usize,
+    pub capture_stats: AudioCaptureStats,
+    pub playback_stats: AudioPlaybackStats,
+    pub timeline: LiveStreamTimeline,
+}
